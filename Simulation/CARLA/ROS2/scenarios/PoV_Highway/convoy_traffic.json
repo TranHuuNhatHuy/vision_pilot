@@ -1,0 +1,35 @@
+{
+  "scenario_name": "convoy_traffic",
+  "description": "Multiple vehicles driving in convoy and adjacent lanes",
+  "weather": "ClearNoon",
+  "hero": {
+    "spawn_index": 0
+  },
+  "npc_vehicles": [
+    {
+      "type": "vehicle.tesla.model3",
+      "spawn_relative_to": "hero",
+      "distance_m": 35.0,
+      "lane": "same",
+      "autopilot": true,
+      "speed_limit_percentage": 25
+    },
+    {
+      "type": "vehicle.audi.a2",
+      "spawn_relative_to": "hero",
+      "distance_m": 75.0,
+      "lane": "same",
+      "autopilot": true,
+      "speed_limit_percentage": 25
+    },
+    {
+      "type": "vehicle.toyota.prius",
+      "spawn_relative_to": "hero",
+      "distance_m": 20.0,
+      "lane": "left",
+      "autopilot": true,
+      "speed_limit_percentage": 15
+    }
+  ]
+}
+
