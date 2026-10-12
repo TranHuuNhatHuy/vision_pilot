@@ -13,11 +13,13 @@ def generate_launch_description():
     host_arg = DeclareLaunchArgument('host', default_value='localhost')
     port_arg = DeclareLaunchArgument('port', default_value='2000')
 
-    default_rig_file = os.path.join(ws_root, "config", "carla916.json")
+    map_arg = DeclareLaunchArgument('map', default_value='', description='CARLA map to load (e.g. PoV_Highway, Town04)')
+    scenario_arg = DeclareLaunchArgument('scenario', default_value='', description='Scenario name (e.g. lead_vehicle_acc, cut_in, convoy_traffic, foggy_drive, free_drive)')
+
     rig_file_arg = DeclareLaunchArgument(
         "rig_file",
-        default_value=default_rig_file,
-        description="Path to the CARLA sensor rig JSON",
+        default_value="",
+        description="Path to legacy CARLA rig JSON or explicit scenario JSON (optional)",
     )
 
     carla_config = ExecuteProcess(
@@ -30,7 +32,9 @@ def generate_launch_description():
             ),
             "--host", LaunchConfiguration("host"),
             "--port", LaunchConfiguration("port"),
-             "-f", LaunchConfiguration("rig_file"),
+            "-f", LaunchConfiguration("rig_file"),
+            "--map", LaunchConfiguration("map"),
+            "--scenario", LaunchConfiguration("scenario"),
             # "-a",
         ],
         output="screen",
@@ -71,7 +75,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        host_arg, port_arg, rig_file_arg,
+        host_arg, port_arg, map_arg, scenario_arg, rig_file_arg,
         carla_config,
         start_nodes_when_ready,
     ])
