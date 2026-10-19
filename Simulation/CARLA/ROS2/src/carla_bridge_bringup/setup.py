@@ -8,10 +8,13 @@ setup_dir = os.path.dirname(os.path.abspath(__file__))
 scenarios_root = os.path.abspath(os.path.join(setup_dir, '..', '..', 'scenarios'))
 scenario_files = []
 if os.path.isdir(scenarios_root):
+    top_files = sorted(glob(os.path.join(scenarios_root, '*.py')))
+    if top_files:
+        scenario_files.append((os.path.join('share', package_name, 'scenarios'), [os.path.relpath(f, setup_dir) for f in top_files]))
     for map_name in sorted(os.listdir(scenarios_root)):
         map_dir = os.path.join(scenarios_root, map_name)
-        if os.path.isdir(map_dir):
-            files = sorted(glob(os.path.join(map_dir, '*.json')))
+        if os.path.isdir(map_dir) and not map_name.startswith('__'):
+            files = sorted(glob(os.path.join(map_dir, '*.py')))
             if files:
                 rel_files = [os.path.relpath(f, setup_dir) for f in files]
                 scenario_files.append((os.path.join('share', package_name, 'scenarios', map_name), rel_files))

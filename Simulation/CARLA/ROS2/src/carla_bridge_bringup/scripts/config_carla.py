@@ -1,39 +1,47 @@
 #!/usr/bin/env python3
-"""Spawn the VisionPilot ego + sensors + NPC traffic in CARLA.
+"""Spawn the VisionPilot ego + sensors + scenarios in CARLA via Python API.
 
-Architecture: 1-map-multiple-scenarios.
-Each map folder under scenarios/ (e.g., scenarios/PoV_Highway, scenarios/Town04)
-contains:
-  - base.json: defines the base vehicle, default sensors, default weather, and map name.
-  - <scenario>.json: defines scenario-specific overrides (NPC traffic, weather challenges, spawn points).
+Architecture: 1-Map-Multiple-Scenarios (Native CARLA Python API).
+Each map folder under scenarios/ (e.g. scenarios/PoV_Highway, scenarios/Town04)
+contains Python modules defining scenario classes (subclasses of CarlaScenario).
 
-Pure CARLA PythonAPI — no ROS dependency inside this script.
-Native CARLA --ros2 publishes camera and sensors directly.
+Backward compatibility: Legacy JSON scenario files can also be passed via -f.
 """
 
 import argparse
 import glob
+import importlib
+import importlib.util
+import inspect
 import json
 import logging
 import math
 import os
-import random
 import signal
 import sys
 import time
 
+# Ensure scenarios package is in PYTHONPATH
+_ws_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+_scenarios_src = os.path.join(_ws_root, "scenarios")
+if _scenarios_src not in sys.path:
+    sys.path.insert(0, _ws_root)
+
+# Also check installed share scenarios
+_share_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _share_root not in sys.path:
+    sys.path.insert(0, _share_root)
+
 import carla
+from scenarios.scenario_base import CarlaScenario
 
 
 def find_scenarios_dir():
-    """Locate the scenarios directory from source tree, installed share, or environment."""
+    """Locate the scenarios directory from workspace source tree or installed share."""
     candidates = [
         os.environ.get("CARLA_SCENARIOS_DIR", ""),
-        # Installed package share: <prefix>/share/carla_bridge_bringup/scenarios
-        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scenarios")),
-        # Workspace source tree: <ws>/Simulation/CARLA/ROS2/scenarios
         os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "scenarios")),
-        # Relative to cwd
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scenarios")),
         os.path.abspath(os.path.join(os.getcwd(), "Simulation", "CARLA", "ROS2", "scenarios")),
         os.path.abspath(os.path.join(os.getcwd(), "scenarios")),
     ]
@@ -43,30 +51,19 @@ def find_scenarios_dir():
     return ""
 
 
-def deep_merge(base, override):
-    """Recursively merge override dictionary into base dictionary."""
-    result = dict(base)
-    for k, v in override.items():
-        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
-            result[k] = deep_merge(result[k], v)
-        else:
-            result[k] = v
-    return result
-
-
 def list_scenarios():
-    """Print all available maps and scenarios."""
+    """Discover and display all available maps and scenarios."""
     scenarios_dir = find_scenarios_dir()
     if not scenarios_dir or not os.path.isdir(scenarios_dir):
         print("Scenarios directory not found.")
         return
 
     print("==================================================================")
-    print(" VisionPilot CARLA Simulation: Maps & Scenarios")
+    print(" VisionPilot CARLA Simulation: Maps & Scenarios (Python API)")
     print(f" Root: {scenarios_dir}")
     print("==================================================================")
 
-    maps = sorted([d for d in os.listdir(scenarios_dir) if os.path.isdir(os.path.join(scenarios_dir, d))])
+    maps = sorted([d for d in os.listdir(scenarios_dir) if os.path.isdir(os.path.join(scenarios_dir, d)) and not d.startswith("__")])
     if not maps:
         print(" No map scenario directories found.")
         return
@@ -74,221 +71,183 @@ def list_scenarios():
     for m in maps:
         map_dir = os.path.join(scenarios_dir, m)
         print(f"\n Map: \033[1;36m{m}\033[0m")
-        scen_files = sorted(glob.glob(os.path.join(map_dir, "*.json")))
-        for sf in scen_files:
-            fname = os.path.basename(sf)
+
+        # Discover Python scenarios
+        py_files = sorted(glob.glob(os.path.join(map_dir, "*.py")))
+        for pf in py_files:
+            fname = os.path.basename(pf)
             scen_id = os.path.splitext(fname)[0]
-            if scen_id == "base":
+            if scen_id in ["__init__", "base"]:
                 continue
+            desc = "Python API Scenario"
             try:
-                with open(sf) as f:
-                    data = json.load(f)
-                desc = data.get("description", "No description")
-            except Exception:
-                desc = "(error reading file)"
+                spec = importlib.util.spec_from_file_location(f"scenarios.{m}.{scen_id}", pf)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                if hasattr(mod, "Scenario"):
+                    desc = getattr(mod.Scenario, "description", desc)
+            except Exception as e:
+                desc = f"(error inspecting: {e})"
             print(f"   * \033[1;32m{scen_id:<18}\033[0m: {desc}")
 
     print("\n------------------------------------------------------------------")
     print(" Launch commands:")
     print("   ros2 launch carla_bridge_bringup carla_bridge.launch.py map:=PoV_Highway scenario:=lead_vehicle_acc")
     print("   ros2 launch carla_bridge_bringup carla_bridge.launch.py map:=PoV_Highway scenario:=cut_in")
+    print("   ros2 launch carla_bridge_bringup carla_bridge.launch.py map:=PoV_Highway scenario:=static_obstacle")
     print("   ros2 launch carla_bridge_bringup carla_bridge.launch.py map:=Town04 scenario:=dense_traffic")
+    print("   ros2 launch carla_bridge_bringup carla_bridge.launch.py map:=Town04 scenario:=foggy_drive")
     print("==================================================================")
 
 
-def load_scenario_config(file_arg="", map_arg="", scenario_arg=""):
-    """Load and merge configuration according to 1-map-multiple-scenarios architecture."""
+def load_python_scenario_class(map_name, scenario_name):
+    """Dynamically load Scenario class from scenarios.<map_name>.<scenario_name>."""
     scenarios_dir = find_scenarios_dir()
+    if not scenarios_dir:
+        raise RuntimeError("Scenarios directory not found.")
 
-    # Case 1: An explicit JSON file path is provided via -f
+    module_file = os.path.join(scenarios_dir, map_name, f"{scenario_name}.py")
+    if not os.path.isfile(module_file):
+        return None
+
+    spec = importlib.util.spec_from_file_location(f"scenarios.{map_name}.{scenario_name}", module_file)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    if hasattr(mod, "Scenario"):
+        return mod.Scenario
+    raise AttributeError(f"Module {module_file} does not define a 'Scenario' class")
+
+
+def create_scenario_from_json(json_path):
+    """Adapt a legacy JSON file into a CarlaScenario subclass for backward compatibility."""
+    with open(json_path) as f:
+        data = json.load(f)
+
+    # Check for base.json in same dir
+    file_dir = os.path.abspath(os.path.dirname(json_path))
+    base_path = os.path.join(file_dir, "base.json")
+    if os.path.basename(json_path) != "base.json" and os.path.isfile(base_path):
+        with open(base_path) as bf:
+            base_data = json.load(bf)
+        # Simple merge
+        for k, v in base_data.items():
+            if k not in data:
+                data[k] = v
+
+    class JsonAdaptedScenario(CarlaScenario):
+        map_name = data.get("map", "Town04")
+        scenario_name = data.get("scenario_name", os.path.splitext(os.path.basename(json_path))[0])
+        description = data.get("description", "JSON Scenario")
+        hero_type = data.get("hero", {}).get("type") or data.get("type", "vehicle.lincoln.mkz_2020")
+        hero_id = data.get("hero", {}).get("id") or data.get("id", "hero")
+        hero_spawn_index = int(data.get("hero", {}).get("spawn_index", data.get("spawn_index", 0)))
+
+        def setup_npcs(self):
+            for npc in data.get("npc_vehicles", []):
+                bp = npc.get("type", "vehicle.*")
+                if npc.get("spawn_relative_to") == "hero":
+                    dist = float(npc.get("distance_m", 30.0))
+                    lane = npc.get("lane", "same")
+                    wp = self.get_waypoint_ahead(distance_m=dist, lane=lane)
+                    self.spawn_npc(bp, wp.transform, autopilot=npc.get("autopilot", True),
+                                   speed_pct=float(npc.get("speed_limit_percentage", 0.0)))
+                elif npc.get("spawn_index") is not None:
+                    sps = self.world.get_map().get_spawn_points()
+                    idx = int(npc.get("spawn_index"))
+                    if 0 <= idx < len(sps):
+                        self.spawn_npc(bp, sps[idx], autopilot=npc.get("autopilot", True))
+
+    return JsonAdaptedScenario
+
+
+def resolve_scenario(file_arg="", map_arg="", scenario_arg=""):
+    """Resolve scenario class from arguments."""
+    target_map = map_arg if map_arg else "Town04"
+    target_scen = scenario_arg if scenario_arg else ""
+
+    # Case 1: An explicit JSON file path is given via -f
     if file_arg and os.path.isfile(file_arg):
-        with open(file_arg) as f:
-            cfg = json.load(f)
-        # If this JSON is inside a map scenario directory and not base.json itself, inherit base.json
-        file_dir = os.path.abspath(os.path.dirname(file_arg))
-        base_path = os.path.join(file_dir, "base.json")
-        if os.path.basename(file_arg) != "base.json" and os.path.isfile(base_path):
-            with open(base_path) as bf:
-                base_cfg = json.load(bf)
-            cfg = deep_merge(base_cfg, cfg)
-        if map_arg:
-            cfg["map"] = map_arg
-        return cfg
+        return create_scenario_from_json(file_arg)
 
-    # Case 2: Shorthand passed via -f (e.g., -f PoV_Highway/lead_vehicle_acc or -f lead_vehicle_acc)
-    if file_arg and scenarios_dir:
-        target = file_arg[:-5] if file_arg.endswith(".json") else file_arg
+    # Case 2: Shorthand passed via -f (e.g. PoV_Highway/lead_vehicle_acc)
+    if file_arg:
+        target = file_arg[:-3] if file_arg.endswith(".py") else file_arg
+        target = target[:-5] if target.endswith(".json") else target
         if "/" in target:
             target_map, target_scen = target.split("/", 1)
         else:
-            target_map = map_arg or "Town04"
             target_scen = target
-        scen_path = os.path.join(scenarios_dir, target_map, f"{target_scen}.json")
-        base_path = os.path.join(scenarios_dir, target_map, "base.json")
-        if os.path.isfile(scen_path):
-            base_cfg = {}
-            if os.path.isfile(base_path):
-                with open(base_path) as bf:
-                    base_cfg = json.load(bf)
-            with open(scen_path) as sf:
-                scen_cfg = json.load(sf)
-            cfg = deep_merge(base_cfg, scen_cfg)
-            if map_arg:
-                cfg["map"] = map_arg
-            return cfg
 
-    # Case 3: Scenario and/or map specified via arguments
-    target_map = map_arg if map_arg else "Town04"
-    if scenario_arg and scenarios_dir:
-        scen_name = scenario_arg[:-5] if scenario_arg.endswith(".json") else scenario_arg
-        scen_path = os.path.join(scenarios_dir, target_map, f"{scen_name}.json")
-        base_path = os.path.join(scenarios_dir, target_map, "base.json")
-        if not os.path.isfile(scen_path):
-            raise FileNotFoundError(
-                f"Scenario '{scen_name}' not found for map '{target_map}'. "
-                f"Looked in: {scen_path}. Run with --list to see available scenarios."
-            )
-        base_cfg = {}
-        if os.path.isfile(base_path):
-            with open(base_path) as bf:
-                base_cfg = json.load(bf)
-        with open(scen_path) as sf:
-            scen_cfg = json.load(sf)
-        cfg = deep_merge(base_cfg, scen_cfg)
-        cfg["map"] = target_map
-        return cfg
+    # Case 3: Specific map and scenario
+    if target_scen:
+        scen_cls = load_python_scenario_class(target_map, target_scen)
+        if scen_cls is not None:
+            return scen_cls
 
-    # Case 4: Only map specified, pick default scenario for that map
-    if map_arg and scenarios_dir:
-        base_path = os.path.join(scenarios_dir, target_map, "base.json")
-        default_scens = ["free_drive", "free_cruise", "base"]
-        for ds in default_scens:
-            dsp = os.path.join(scenarios_dir, target_map, f"{ds}.json")
-            if os.path.isfile(dsp):
-                base_cfg = {}
-                if os.path.isfile(base_path) and ds != "base":
-                    with open(base_path) as bf:
-                        base_cfg = json.load(bf)
-                with open(dsp) as sf:
-                    scen_cfg = json.load(sf)
-                cfg = deep_merge(base_cfg, scen_cfg)
-                cfg["map"] = target_map
-                return cfg
+        # Fallback to json in scenarios dir
+        s_dir = find_scenarios_dir()
+        if s_dir:
+            jp = os.path.join(s_dir, target_map, f"{target_scen}.json")
+            if os.path.isfile(jp):
+                return create_scenario_from_json(jp)
 
-    # Case 5: Default fallback
-    if scenarios_dir:
-        t4_base = os.path.join(scenarios_dir, "Town04", "base.json")
-        t4_free = os.path.join(scenarios_dir, "Town04", "free_cruise.json")
-        if os.path.isfile(t4_free):
-            with open(t4_base) as bf:
-                base_cfg = json.load(bf)
-            with open(t4_free) as sf:
-                scen_cfg = json.load(sf)
-            return deep_merge(base_cfg, scen_cfg)
-
-    # Legacy config/carla916.json fallback
-    legacy_path = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "..", "config", "carla916.json")
-    )
-    if os.path.isfile(legacy_path):
-        with open(legacy_path) as f:
-            return json.load(f)
-
-    raise RuntimeError("Could not resolve any CARLA scenario or configuration file.")
-
-
-def _check_versions(client):
-    client_ver = client.get_client_version()
-    server_ver = client.get_server_version()
-    if client_ver.split("-")[0] != server_ver.split("-")[0]:
-        logging.warning(
-            "CARLA PythonAPI %s != server %s — API calls may segfault; stage matching wheel",
-            client_ver,
-            server_ver,
+        raise FileNotFoundError(
+            f"Scenario '{target_scen}' not found for map '{target_map}'. "
+            f"Run with --list to see available scenarios."
         )
-    else:
-        logging.info("CARLA client/server version %s", server_ver)
+
+    # Case 4: Only map specified, pick default scenario
+    default_candidates = ["free_drive", "free_cruise", "base"]
+    for dc in default_candidates:
+        scen_cls = load_python_scenario_class(target_map, dc)
+        if scen_cls is not None:
+            return scen_cls
+
+    # Default fallback to Town04 free_cruise
+    scen_cls = load_python_scenario_class("Town04", "free_cruise")
+    if scen_cls is not None:
+        return scen_cls
+
+    # Legacy config/carla916.json
+    legacy_json = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "config", "carla916.json"))
+    if os.path.isfile(legacy_json):
+        return create_scenario_from_json(legacy_json)
+
+    raise RuntimeError("Could not resolve any scenario.")
 
 
-def _setup_weather(world, weather_config):
-    """Set CARLA weather from preset name or custom attribute dictionary."""
-    if not weather_config:
-        return
-    if isinstance(weather_config, str):
-        preset = getattr(carla.WeatherParameters, weather_config, None)
-        if preset is not None:
-            world.set_weather(preset)
-            logging.info("Applied weather preset: %s", weather_config)
-        else:
-            logging.warning("Unknown weather preset '%s'", weather_config)
-    elif isinstance(weather_config, dict):
-        weather = carla.WeatherParameters()
-        for k, v in weather_config.items():
-            if hasattr(weather, k):
-                setattr(weather, k, float(v))
-            else:
-                logging.warning("Unknown weather parameter '%s'", k)
-        world.set_weather(weather)
-        logging.info("Applied custom weather: %s", weather_config)
-
-
-def _setup_vehicle(world, config):
+def _setup_vehicle(world, scenario):
     bp_library = world.get_blueprint_library()
     map_ = world.get_map()
 
-    # Support nested "hero" object as well as legacy top-level keys
-    hero_cfg = config.get("hero", {})
-    vehicle_type = hero_cfg.get("type") or config.get("type", "vehicle.lincoln.mkz_2020")
-    vehicle_id = hero_cfg.get("id") or config.get("id", "hero")
-
-    logging.debug("Spawning vehicle: %s (id: %s)", vehicle_type, vehicle_id)
-
-    candidates = bp_library.filter(vehicle_type)
+    candidates = bp_library.filter(scenario.hero_type)
     if not candidates:
-        raise ValueError(f"No blueprint found for vehicle type '{vehicle_type}'")
+        raise ValueError(f"No blueprint found for vehicle type '{scenario.hero_type}'")
     bp = candidates[0]
-    bp.set_attribute("role_name", vehicle_id)
-    bp.set_attribute("ros_name", vehicle_id)
+    bp.set_attribute("role_name", scenario.hero_id)
+    bp.set_attribute("ros_name", scenario.hero_id)
 
     spawn_points = map_.get_spawn_points()
-    for i in range(len(spawn_points)):
-        waypt = map_.get_waypoint(spawn_points[i].location)
-        logging.debug(
-            "Spawn Point %d: road %s lane %s section %s",
-            i, waypt.road_id, waypt.lane_id, waypt.section_id
-        )
-
-    # Priority: SPAWN_INDEX env > hero.spawn_index > spawn_index > 0
-    if "spawn_index" in hero_cfg:
-        default_idx = int(hero_cfg["spawn_index"])
-    else:
-        default_idx = int(config.get("spawn_index", 0))
-
+    default_idx = int(scenario.hero_spawn_index)
     idx = int(os.environ.get("SPAWN_INDEX", default_idx))
+
     if not 0 <= idx < len(spawn_points):
         raise IndexError(
-            "SPAWN_INDEX {} out of range: map {} has {} spawn points (valid 0..{})".format(
-                idx, map_.name, len(spawn_points), len(spawn_points) - 1
-            )
+            f"SPAWN_INDEX {idx} out of range: map {map_.name} has {len(spawn_points)} spawn points (valid 0..{len(spawn_points)-1})"
         )
-    logging.info(
-        "map %s: using spawn index %d (default %d; override with SPAWN_INDEX)",
-        map_.name,
-        idx,
-        default_idx,
-    )
-    spawn_pt = spawn_points[idx]
 
+    logging.info("Map %s: spawning hero vehicle at spawn index %d", map_.name, idx)
+    spawn_pt = spawn_points[idx]
     return world.spawn_actor(bp, spawn_pt, attach_to=None)
 
 
 def _setup_sensors(world, vehicle, sensors_config):
     bp_library = world.get_blueprint_library()
-
     sensors = []
+
     for sensor in sensors_config:
         logging.debug("Spawning sensor: %s", sensor.get("id"))
-
         bp = bp_library.filter(sensor.get("type"))[0]
         bp.set_attribute("ros_name", sensor.get("id"))
         bp.set_attribute("role_name", sensor.get("id"))
@@ -313,107 +272,6 @@ def _setup_sensors(world, vehicle, sensors_config):
         sensors.append(sensor_actor)
 
     return sensors
-
-
-def _setup_npc_traffic(world, traffic_manager, config, hero_actor=None):
-    """Spawn NPC traffic based on scenario definition (fixed indices, random, or relative to hero)."""
-    bp_library = world.get_blueprint_library()
-    map_ = world.get_map()
-    spawn_points = map_.get_spawn_points()
-
-    npc_vehicles = []
-    for npc in config.get("npc_vehicles", []):
-        count = int(npc.get("count", 1))
-        for _ in range(count):
-            bp_filter = npc.get("type", "vehicle.*")
-            candidates = bp_library.filter(bp_filter)
-            if not candidates:
-                logging.warning("No blueprint matches '%s', skipping", bp_filter)
-                continue
-            bp = random.choice(candidates)
-            if bp.has_attribute("color"):
-                color = random.choice(bp.get_attribute("color").recommended_values)
-                bp.set_attribute("color", color)
-
-            spawn_pt = None
-            # Relative spawning along lane waypoint
-            if npc.get("spawn_relative_to") == "hero" and hero_actor is not None:
-                hero_transform = hero_actor.get_transform()
-                hero_wp = map_.get_waypoint(
-                    hero_transform.location,
-                    project_to_road=True,
-                    lane_type=carla.LaneType.Driving,
-                )
-                if hero_wp is not None:
-                    distance_m = float(npc.get("distance_m", 30.0))
-                    if distance_m >= 0:
-                        next_wps = hero_wp.next(distance_m)
-                        target_wp = next_wps[0] if next_wps else hero_wp
-                    else:
-                        prev_wps = hero_wp.previous(abs(distance_m))
-                        target_wp = prev_wps[0] if prev_wps else hero_wp
-
-                    lane = npc.get("lane", "same").lower()
-                    if lane == "left":
-                        left_wp = target_wp.get_left_lane()
-                        if left_wp is not None and left_wp.lane_type == carla.LaneType.Driving:
-                            target_wp = left_wp
-                        else:
-                            logging.warning("Left lane not available at %sm, using current lane", distance_m)
-                    elif lane == "right":
-                        right_wp = target_wp.get_right_lane()
-                        if right_wp is not None and right_wp.lane_type == carla.LaneType.Driving:
-                            target_wp = right_wp
-                        else:
-                            logging.warning("Right lane not available at %sm, using current lane", distance_m)
-
-                    spawn_pt = carla.Transform(
-                        carla.Location(
-                            x=target_wp.transform.location.x,
-                            y=target_wp.transform.location.y,
-                            z=target_wp.transform.location.z + 0.5,
-                        ),
-                        target_wp.transform.rotation,
-                    )
-            elif npc.get("spawn_index") is not None:
-                idx = int(npc.get("spawn_index"))
-                if 0 <= idx < len(spawn_points):
-                    spawn_pt = spawn_points[idx]
-                else:
-                    logging.warning("npc spawn_index %d out of range (max %d), skipping", idx, len(spawn_points) - 1)
-                    continue
-            else:
-                # Random spawn point, avoiding hero spawn index if possible
-                hero_cfg = config.get("hero", {})
-                hero_idx = int(hero_cfg.get("spawn_index", config.get("spawn_index", 0)))
-                free = [p for i, p in enumerate(spawn_points) if i != hero_idx]
-                if free:
-                    spawn_pt = random.choice(free)
-                else:
-                    logging.warning("No free spawn points for random NPC")
-                    continue
-
-            if spawn_pt is None:
-                continue
-
-            actor = world.try_spawn_actor(bp, spawn_pt)
-            if actor is None:
-                logging.warning("Failed to spawn NPC '%s' (collision at spawn point)", bp_filter)
-                continue
-
-            if npc.get("autopilot", True):
-                actor.set_autopilot(True, traffic_manager.get_port())
-                if "speed_limit_percentage" in npc:
-                    traffic_manager.vehicle_percentage_speed_difference(
-                        actor, float(npc["speed_limit_percentage"])
-                    )
-                if "keep_lane" in npc and npc["keep_lane"]:
-                    traffic_manager.auto_lane_change(actor, False)
-
-            npc_vehicles.append(actor)
-
-    logging.info("Spawned %d NPC vehicles", len(npc_vehicles))
-    return npc_vehicles
 
 
 def _follow_vehicle(world, vehicle, spectator):
@@ -441,19 +299,19 @@ def main(args):
     world = None
     vehicle = None
     sensors = []
-    npc_vehicles = []
+    scenario_instance = None
     original_settings = None
 
     try:
-        config = load_scenario_config(
+        ScenarioClass = resolve_scenario(
             file_arg=args.file,
             map_arg=args.map,
             scenario_arg=args.scenario,
         )
 
-        map_name = args.map if args.map else config.get("map", "Town04")
-        scen_name = config.get("scenario_name", "custom")
-        desc = config.get("description", "")
+        map_name = args.map if args.map else getattr(ScenarioClass, "map_name", "Town04")
+        scen_name = getattr(ScenarioClass, "scenario_name", "custom")
+        desc = getattr(ScenarioClass, "description", "")
 
         logging.info("Starting Scenario: [%s] on Map [%s]", scen_name, map_name)
         if desc:
@@ -461,10 +319,8 @@ def main(args):
 
         client = carla.Client(args.host, args.port)
         client.set_timeout(60.0)
-        _check_versions(client)
 
         current_world_name = client.get_world().get_map().name
-        # Only reload world if map differs to avoid unnecessary reload time
         if current_world_name != map_name and not current_world_name.endswith("/" + map_name):
             logging.info("Loading map: %s", map_name)
             client.load_world(map_name)
@@ -477,29 +333,39 @@ def main(args):
         original_settings = world.get_settings()
         settings = world.get_settings()
         settings.synchronous_mode = True
-        settings.fixed_delta_seconds = 0.1  # 10 Hz fixed simulation step
+        settings.fixed_delta_seconds = 0.1  # 10 Hz simulation step
         world.apply_settings(settings)
 
         traffic_manager = client.get_trafficmanager()
         traffic_manager.set_synchronous_mode(True)
 
         # Apply weather
-        _setup_weather(world, config.get("weather"))
+        if hasattr(ScenarioClass, "weather") and ScenarioClass.weather is not None:
+            world.set_weather(ScenarioClass.weather)
+            logging.info("Applied weather parameters to world")
 
-        # Spawn ego vehicle and sensors
-        vehicle = _setup_vehicle(world, config)
-        sensors = _setup_sensors(world, vehicle, config.get("sensors", []))
+        # 1. Spawn ego vehicle and mount sensors
+        vehicle = _setup_vehicle(world, ScenarioClass)
+        sensors = _setup_sensors(world, vehicle, ScenarioClass.sensors_config)
 
-        # Spawn NPC vehicles
-        npc_vehicles = _setup_npc_traffic(world, traffic_manager, config, hero_actor=vehicle)
+        # 2. CRITICAL STEP: Tick once to commit ego vehicle physics to server!
+        world.tick()
 
-        world.tick()  # Settle physics before autopilot / spectator setup
+        hero_loc = vehicle.get_location()
+        logging.info("Hero vehicle active at (%0.2f, %0.2f, %0.2f)", hero_loc.x, hero_loc.y, hero_loc.z)
+
+        # 3. Instantiate scenario and spawn NPCs relative to true hero position
+        scenario_instance = ScenarioClass(world, traffic_manager, hero_vehicle=vehicle)
+        scenario_instance.setup_npcs()
+
+        # Tick to settle NPC vehicle physics
+        world.tick()
+        logging.info("Spawned %d scenario NPC/obstacle actors", len(scenario_instance.npc_actors) + len(scenario_instance.static_actors))
 
         if args.autopilot:
             vehicle.set_autopilot(True)
 
         spectator = world.get_spectator()
-
         logging.info("Running... (ego up; telemetry is published by the bridge container)")
 
         TARGET_HZ = 10.0
@@ -509,6 +375,8 @@ def main(args):
             loop_start = time.time()
 
             world.tick()
+            if scenario_instance:
+                scenario_instance.tick()
             _follow_vehicle(world, vehicle, spectator)
 
             elapsed = time.time() - loop_start
@@ -522,19 +390,8 @@ def main(args):
     finally:
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         try:
-            if original_settings and world:
-                logging.info("Restoring original settings")
-                try:
-                    world.apply_settings(original_settings)
-                except Exception as e:
-                    logging.debug("Error restoring settings: %s", e)
-
-            for actor in npc_vehicles:
-                try:
-                    if actor.is_alive:
-                        actor.destroy()
-                except Exception as e:
-                    logging.debug("Error destroying NPC: %s", e)
+            if scenario_instance:
+                scenario_instance.cleanup()
 
             for sensor in sensors:
                 try:
@@ -546,70 +403,48 @@ def main(args):
             if vehicle:
                 try:
                     if vehicle.is_alive:
+                        vehicle.set_autopilot(False)
                         vehicle.destroy()
                 except Exception as e:
                     logging.debug("Error destroying vehicle: %s", e)
+
+            if world:
+                try:
+                    world.tick()
+                except Exception:
+                    pass
+
+            if traffic_manager:
+                try:
+                    traffic_manager.set_synchronous_mode(False)
+                except Exception:
+                    pass
+
+            if original_settings and world:
+                logging.info("Restoring original settings")
+                try:
+                    world.apply_settings(original_settings)
+                except Exception as e:
+                    logging.debug("Error restoring settings: %s", e)
 
         finally:
             signal.signal(signal.SIGINT, signal.default_int_handler)
 
 
 if __name__ == "__main__":
-    argparser = argparse.ArgumentParser(description="CARLA Scenario Runner for VisionPilot")
-    argparser.add_argument(
-        "--host",
-        metavar="H",
-        default="localhost",
-        help="IP of the host CARLA Simulator (default: localhost)",
-    )
-    argparser.add_argument(
-        "--port",
-        metavar="P",
-        default=2000,
-        type=int,
-        help="TCP port of CARLA Simulator (default: 2000)",
-    )
-    argparser.add_argument(
-        "-f", "--file",
-        default="",
-        help="Direct path to config/scenario JSON or shorthand (e.g. PoV_Highway/lead_vehicle_acc)",
-    )
-    argparser.add_argument(
-        "-m", "--map",
-        type=str,
-        default="",
-        help="CARLA map name (e.g. PoV_Highway, Town04)",
-    )
-    argparser.add_argument(
-        "-s", "--scenario",
-        type=str,
-        default="",
-        help="Scenario name to load (e.g. free_drive, lead_vehicle_acc, cut_in, convoy_traffic, foggy_drive)",
-    )
-    argparser.add_argument(
-        "-l", "--list",
-        action="store_true",
-        help="List all available maps and scenarios",
-    )
-    argparser.add_argument(
-        "-v", "--verbose",
-        action="store_true",
-        dest="debug",
-        help="Print debug information",
-    )
-    argparser.add_argument(
-        "-a", "--autopilot",
-        action="store_true",
-        dest="autopilot",
-        help="Turn on autopilot for the hero vehicle",
-    )
+    argparser = argparse.ArgumentParser(description="CARLA Python API Scenario Runner for VisionPilot")
+    argparser.add_argument("--host", default="localhost", help="IP of CARLA Simulator (default: localhost)")
+    argparser.add_argument("--port", default=2000, type=int, help="TCP port of CARLA Simulator (default: 2000)")
+    argparser.add_argument("-f", "--file", default="", help="Direct path to Python or JSON scenario file")
+    argparser.add_argument("-m", "--map", type=str, default="", help="CARLA map name (e.g. PoV_Highway, Town04)")
+    argparser.add_argument("-s", "--scenario", type=str, default="", help="Scenario name (e.g. lead_vehicle_acc, cut_in, convoy_traffic, static_obstacle, dense_traffic)")
+    argparser.add_argument("-l", "--list", action="store_true", help="List all available maps and scenarios")
+    argparser.add_argument("-v", "--verbose", action="store_true", dest="debug", help="Print debug information")
+    argparser.add_argument("-a", "--autopilot", action="store_true", help="Turn on autopilot for hero vehicle")
 
     args = argparser.parse_args()
 
     log_level = logging.DEBUG if args.debug else logging.INFO
     logging.basicConfig(format="%(levelname)s: %(message)s", level=log_level)
-
-    if not args.list:
-        logging.info("Connecting to CARLA server %s:%s", args.host, args.port)
 
     main(args)

@@ -22,6 +22,12 @@ def generate_launch_description():
         description="Path to legacy CARLA rig JSON or explicit scenario JSON (optional)",
     )
 
+    rmw_arg = DeclareLaunchArgument(
+        'rmw',
+        default_value=os.environ.get('RMW_IMPLEMENTATION', 'rmw_fastrtps_cpp'),
+        description='RMW implementation matching CARLA (e.g. rmw_fastrtps_cpp, rmw_cyclonedds_cpp)'
+    )
+
     carla_config = ExecuteProcess(
         cmd=[
             "python3",
@@ -39,6 +45,7 @@ def generate_launch_description():
         ],
         output="screen",
         emulate_tty=True,
+        additional_env={'RMW_IMPLEMENTATION': LaunchConfiguration('rmw')},
     )
 
     carla_vehicle_speed_publisher_node = Node(
@@ -46,6 +53,7 @@ def generate_launch_description():
         executable='carla_vehicle_speed_publisher_node',
         name='carla_vehicle_speed_publisher',
         output='screen',
+        additional_env={'RMW_IMPLEMENTATION': LaunchConfiguration('rmw')},
         parameters=[{'use_sim_time': True,
                      'host': LaunchConfiguration('host'),
                      'port': LaunchConfiguration('port'),
@@ -57,6 +65,7 @@ def generate_launch_description():
         executable='carla_control_publisher_node',
         name='carla_control_publisher',
         output='screen',
+        additional_env={'RMW_IMPLEMENTATION': LaunchConfiguration('rmw')},
         parameters=[{'use_sim_time': True}]
     )
 
@@ -75,7 +84,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        host_arg, port_arg, map_arg, scenario_arg, rig_file_arg,
+        host_arg, port_arg, map_arg, scenario_arg, rig_file_arg, rmw_arg,
         carla_config,
         start_nodes_when_ready,
     ])
