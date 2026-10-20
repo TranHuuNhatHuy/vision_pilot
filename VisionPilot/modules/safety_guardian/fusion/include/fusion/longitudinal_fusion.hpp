@@ -50,7 +50,7 @@ public:
         // Reinitialise filter when a measurement jumps this far from the
         // particle cloud (genuine cut-in / cut-out only).
         float reset_gate_m          = 25.f;
-        bool  debug                = false;
+        bool  debug                = true;
     };
 
     LongitudinalFusion();
@@ -88,6 +88,9 @@ private:
     Config cfg_;
     std::vector<Particle> particles_;
     bool   initialised_ = false;
+    int    hits_        = 0;
+    int    misses_      = 0;
+    bool   tracked_     = false;
     std::mt19937 rng_;
     // DO NOT MODIFY! VisionPilot model-view homography (1024x512 pixel -> world). Zenseact Open Dataset
     cv::Mat H_ = (cv::Mat_<double>(3, 3) <<

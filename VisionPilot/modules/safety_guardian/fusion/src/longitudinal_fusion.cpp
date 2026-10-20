@@ -31,6 +31,9 @@ void LongitudinalFusion::reset()
 {
     particles_.clear();
     initialised_ = false;
+    hits_ = 0;
+    misses_ = 0;
+    tracked_ = false;
 }
 
 CIPOFusionEstimate LongitudinalFusion::update(
@@ -52,72 +55,65 @@ CIPOFusionEstimate LongitudinalFusion::update(
         }
     }
 
-    // ── Step 3: AutoDrive distance (gated by CIPO probability) ───────────────
-    static constexpr float D_MAX         = 150.f;
-    static constexpr float CIPO_PROB_MIN = 0.40f;  // below this → AD doesn't confirm CIPO
-
-    const bool ad_cipo_confirmed = autodrive.valid &&
-                                   autodrive.flag_prob >= CIPO_PROB_MIN;
-    const bool autospeed_cipo_confirmed = cipo_raw.valid;
-
-    // If neither network confirms a CIPO target, report max distance and
-    // reset the particle filter so we start fresh when a target reappears.
-    if (!ad_cipo_confirmed && !autospeed_cipo_confirmed) {
-        if (initialised_) {
-            VP_INFO("[Fusion] No CIPO confirmed (AD=%.0f%%  AS=none) — reset to %.0f m",
-                    autodrive.valid ? autodrive.flag_prob * 100.f : 0.f, D_MAX);
-            reset();
+    // Temporal tracking state: confirmation + coasting
+    // A target is confirmed after 2 consecutive detection hits.
+    // Once tracked, it coasts across brief detection dropouts (up to 6 frames ~0.2s)
+    // without resetting or jumping to max distance.
+    if (cipo_raw.valid) {
+        hits_++;
+        misses_ = 0;
+        if (hits_ >= 2) {
+            tracked_ = true;
         }
-        est.valid      = true;
-        est.distance_m = D_MAX;
-        return est;
+    } else {
+        misses_++;
+        hits_ = std::max(0, hits_ - 1);
+        if (misses_ >= 6) {
+            tracked_ = false;
+        }
     }
 
-    Meas ad_meas;
-    if (ad_cipo_confirmed) {
-        ad_meas.distance_m = D_MAX * (1.f - autodrive.dist_normalized);
-        const float p      = std::clamp(autodrive.flag_prob, 0.f, 1.f);
-        ad_meas.stddev_m   = cfg_.autodrive_noise_min_m +
-                             (cfg_.autodrive_noise_m - cfg_.autodrive_noise_min_m) * (1.f - p);
-        ad_meas.valid      = true;
+    static constexpr float D_MAX = 150.f;
+
+    // If no target is tracked: report clear highway and reset filter
+    if (!tracked_) {
+        if (initialised_) {
+            VP_INFO("[Fusion] Target lost (misses=%d) — reset to %.0f m", misses_, D_MAX);
+            reset();
+        }
+        est.valid       = false;
+        est.distance_m  = D_MAX;
+        est.velocity_ms = 0.0f;
+        return est;
     }
 
     // ── Step 4: Particle filter ───────────────────────────────────────────────
     const float dt = (dt_s > 1e-6f) ? dt_s : cfg_.dt_s;
 
     if (!initialised_) {
-        if (ad_meas.valid) {
-            init_from(ad_meas.distance_m, ad_meas.stddev_m);
-        } else if (cipo_raw.valid) {
-            init_from(cipo_raw.distance_m, cfg_.cipo_noise_m);
-        } else {
-            return est;
-        }
+        init_from(cipo_raw.distance_m, cfg_.cipo_noise_m);
         initialised_ = true;
     } else {
         predict(dt);
 
-        float cloud_mean = 0.f;
-        for (const auto& p : particles_) cloud_mean += p.distance_m;
-        cloud_mean /= static_cast<float>(particles_.size());
+        if (cipo_raw.valid) {
+            float cloud_mean = 0.f;
+            for (const auto& p : particles_) cloud_mean += p.distance_m;
+            cloud_mean /= static_cast<float>(particles_.size());
 
-        const float gate = cfg_.reset_gate_m;
-
-        if (cipo_raw.valid &&
-            std::abs(cipo_raw.distance_m - cloud_mean) > gate) {
-            VP_INFO("[Fusion] Target change — reinit %.1f→%.1f m (CIPO)  gate=%.1f",
-                    cloud_mean, cipo_raw.distance_m, gate);
-            init_from(cipo_raw.distance_m, cfg_.cipo_noise_m);
-        } else if (ad_meas.valid &&
-                   (ad_meas.distance_m - cloud_mean) > gate) {
-            VP_INFO("[Fusion] Cut-out — reinit %.1f→%.1f m (AD)  gate=%.1f",
-                    cloud_mean, ad_meas.distance_m, gate);
-            init_from(ad_meas.distance_m, ad_meas.stddev_m);
+            // Re-init only on sudden true target jump (e.g. cut-in car ahead by > 25m)
+            if (std::abs(cipo_raw.distance_m - cloud_mean) > cfg_.reset_gate_m) {
+                VP_INFO("[Fusion] Target change — reinit %.1f→%.1f m (CIPO)  gate=%.1f",
+                        cloud_mean, cipo_raw.distance_m, cfg_.reset_gate_m);
+                init_from(cipo_raw.distance_m, cfg_.cipo_noise_m);
+            }
         }
     }
 
-    weight_update(ad_meas, cipo_raw);
-    if (effective_n() < 0.5f * static_cast<float>(cfg_.n_particles)) resample();
+    if (cipo_raw.valid) {
+        weight_update(Meas{}, cipo_raw);
+        if (effective_n() < 0.5f * static_cast<float>(cfg_.n_particles)) resample();
+    }
 
     // ── Step 5: Posterior mean — weighted particle average (MRPT getMean style) ─
     // Both distance and velocity come directly from the particle ensemble.
@@ -142,24 +138,17 @@ CIPOFusionEstimate LongitudinalFusion::update(
 
     // ── Step 7: Debug log ─────────────────────────────────────────────────────
     if (cfg_.debug) {
-        char ad_buf[48], cr_buf[32];
-        if (ad_meas.valid)
-            std::snprintf(ad_buf, sizeof(ad_buf), "%.1f m (p=%.0f%% σ=%.1fm)",
-                          ad_meas.distance_m,
-                          autodrive.valid ? autodrive.flag_prob * 100.f : 0.f,
-                          ad_meas.stddev_m);
-        else
-            std::snprintf(ad_buf, sizeof(ad_buf), "(p=%.0f%% < %.0f%%)",
-                          autodrive.valid ? autodrive.flag_prob * 100.f : 0.f,
-                          CIPO_PROB_MIN * 100.f);
+        char cr_buf[32];
         if (cipo_raw.valid)
             std::snprintf(cr_buf, sizeof(cr_buf), "%.1f m", cipo_raw.distance_m);
         else
             std::snprintf(cr_buf, sizeof(cr_buf), "(none)");
 
-        VP_INFO("[Fusion] AD=%s | CIPO=%s%s | Fused=%.1f m  v=%.2f m/s  ±%.1f m",
-                ad_buf, cr_buf,
+        VP_INFO("[Fusion] AD_prob=%.0f%% | CIPO=%s%s (hits=%d miss=%d) | Fused=%.1f m  v=%.2f m/s  ±%.1f m",
+                autodrive.valid ? autodrive.flag_prob * 100.f : 0.f,
+                cr_buf,
                 est.cut_in_detected ? " [CUT-IN]" : "",
+                hits_, misses_,
                 est.distance_m, est.velocity_ms, est.distance_stddev_m);
     }
 
@@ -188,11 +177,56 @@ LongitudinalFusion::select_cipo(const std::vector<models::Detection>& dets) cons
 
     for (const auto& d : dets) {
         if (d.class_id != 1 && d.class_id != 2) continue;
-        const float cx   = (d.x1 + d.x2) * 0.5f;
-        const float dist = project_dist(H_, cx, d.y2);
+
+        // Bounding box geometry sanity checks
+        const float bw = d.x2 - d.x1;
+        const float bh = d.y2 - d.y1;
+        if (bw < 15.f || bh < 12.f) continue;
+        const float aspect = bw / bh;
+        if (aspect < 0.4f || aspect > 3.2f) continue;
+
+        const float cx = (d.x1 + d.x2) * 0.5f;
+
+        // Project bottom-center point to world coordinates: (x_forward [m], y_lateral [m, +left])
+        std::vector<cv::Point2f> src = {cv::Point2f(cx, d.y2)}, dst;
+        cv::perspectiveTransform(src, dst, H_);
+        const float x_fwd = dst[0].x;
+        const float y_lat = dst[0].y;
+
+        // Object must be ahead of ego vehicle and within trackable horizon (max 95m)
+        if (x_fwd < 2.0f || x_fwd > 95.0f) continue;
+
+        // Distance-scaled confidence gate:
+        // Far field (> 75m) requires higher confidence (>= 0.66) to reject distant horizon noise.
+        // Mid/near field (<= 75m) accepts standard detection confidence (>= 0.55).
+        if (x_fwd > 75.0f && d.score < 0.66f) continue;
+        if (d.score < 0.55f) continue;
+
+        // Physical vehicle width validation via H:
+        // Project bottom corners to get estimated physical width on ground
+        std::vector<cv::Point2f> corners_src = {cv::Point2f(d.x1, d.y2), cv::Point2f(d.x2, d.y2)}, corners_dst;
+        cv::perspectiveTransform(corners_src, corners_dst, H_);
+        const float phys_width = std::abs(corners_dst[1].y - corners_dst[0].y);
+        // Plausible motor vehicle width: 0.7m (motorcycle) to 3.6m (bus/truck)
+        // Discard flat road textures / grass tufts (< 0.7m) or multi-lane artifacts (> 3.6m)
+        if (phys_width < 0.7f || phys_width > 3.6f) {
+            if (cfg_.debug) {
+                VP_INFO("[CIPO-DBG] Rejecting unphysical width: cls=%d score=%.2f w_phys=%.2fm",
+                        d.class_id, d.score, phys_width);
+            }
+            continue;
+        }
+
+        // Lane corridor gating:
+        // Class 1 (in-lane lead): must be within ego lane corridor (|y_lateral| <= 2.0m)
+        // Class 2 (cut-in): must be in adjacent lane corridor (1.0m < |y_lateral| <= 4.5m)
+        if (d.class_id == 1 && std::abs(y_lat) > 2.0f) continue;
+        if (d.class_id == 2 && (std::abs(y_lat) < 1.0f || std::abs(y_lat) > 4.5f)) continue;
+
+        const float dist = std::sqrt(x_fwd * x_fwd + y_lat * y_lat);
         if (cfg_.debug) {
-            VP_INFO("[CIPO-DBG] cls=%d  bbox=(%.0f,%.0f,%.0f,%.0f)  bottom-center=(%.0f,%.0f) → %.1f m",
-                    d.class_id, d.x1, d.y1, d.x2, d.y2, cx, d.y2, dist);
+            VP_INFO("[CIPO-DBG] cls=%d score=%.2f bbox=(%.0f,%.0f,%.0f,%.0f) → fwd=%.1fm lat=%+.1fm dist=%.1fm",
+                    d.class_id, d.score, d.x1, d.y1, d.x2, d.y2, x_fwd, y_lat, dist);
         }
         if (d.class_id == 1 && dist < best_l1) best_l1 = dist;
         if (d.class_id == 2 && dist < best_l2) best_l2 = dist;
@@ -248,8 +282,11 @@ float LongitudinalFusion::gaussian_loglik(float z, float mean, float sigma)
 void LongitudinalFusion::weight_update(const Meas& ad, const Meas& cipo_raw)
 {
     for (auto& p : particles_) {
-        if (ad.valid)       p.log_w += gaussian_loglik(ad.distance_m,       p.distance_m, ad.stddev_m);
-        if (cipo_raw.valid) p.log_w += gaussian_loglik(cipo_raw.distance_m, p.distance_m, cipo_raw.stddev_m);
+        if (cipo_raw.valid) {
+            p.log_w += gaussian_loglik(cipo_raw.distance_m, p.distance_m, cipo_raw.stddev_m);
+        } else if (ad.valid) {
+            p.log_w += gaussian_loglik(ad.distance_m, p.distance_m, ad.stddev_m);
+        }
     }
 }
 
