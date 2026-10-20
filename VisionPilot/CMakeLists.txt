@@ -83,8 +83,12 @@ if(BUILD_TESTING)
 endif()
 
 # config
-file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/config
-        DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+add_custom_target(copy_config ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/config
+        ${CMAKE_CURRENT_BINARY_DIR}/config
+    COMMENT "Syncing config directory to build tree"
+)
 
 # App
 add_subdirectory(app)

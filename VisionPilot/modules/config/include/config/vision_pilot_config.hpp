@@ -54,9 +54,22 @@ struct Config {
 
 static std::string find_config(const std::string& filename) {
     const std::string local  = "config/" + filename;
-    const std::string system = "/usr/share/visionpilot/config/" + filename;
-
     if (std::filesystem::exists(local))  return local;
+
+    const std::string parent_local = "../config/" + filename;
+    if (std::filesystem::exists(parent_local)) return parent_local;
+
+    std::error_code ec;
+    auto exe_path = std::filesystem::canonical("/proc/self/exe", ec);
+    if (!ec) {
+        auto exe_dir = exe_path.parent_path();
+        if (std::filesystem::exists(exe_dir / "config" / filename))
+            return (exe_dir / "config" / filename).string();
+        if (std::filesystem::exists(exe_dir.parent_path() / "config" / filename))
+            return (exe_dir.parent_path() / "config" / filename).string();
+    }
+
+    const std::string system = "/usr/share/visionpilot/config/" + filename;
     if (std::filesystem::exists(system)) return system;
 
     throw std::runtime_error("Config file not found: " + filename);

@@ -8,7 +8,7 @@ set_target_properties(VisionPilot PROPERTIES
         BUILD_WITH_INSTALL_RPATH FALSE
 )
 
-add_dependencies(VisionPilot generate_config)
+add_dependencies(VisionPilot generate_config copy_config)
 
 if (ENABLE_ROS2_INTERFACE)
     find_package(rclcpp REQUIRED)
