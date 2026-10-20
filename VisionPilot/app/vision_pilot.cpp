@@ -53,6 +53,13 @@ int main(int argc, char** argv)
         if (arg == "--debug-viz") debug_viz = true;
     }
 
+    // Ensure ROS 2 DDS can discover CARLA simulator even if ROS_LOCALHOST_ONLY=1
+    // is set in the user's ~/.bashrc.
+    if (const char* env_lh = std::getenv("ROS_LOCALHOST_ONLY"); env_lh && std::string(env_lh) == "1")
+    {
+        setenv("ROS_LOCALHOST_ONLY", "0", 1);
+    }
+
     std::shared_ptr<CameraInterface> camera_interface;
     std::shared_ptr<VehicleInterface> vehicle_interface;
     std::unique_ptr<VisualInterface> visual_interface;
@@ -112,12 +119,18 @@ int main(int argc, char** argv)
     cv::Mat frame, warped, resized;
     bool h_resized_set = false;
     cv::Mat H = load_matrix("H.yaml", "H");
+    bool waiting_logged = false;
     while (true)
     {
         auto [ok, frame] = camera_interface->get_latest_frame();
         if (!ok || frame.empty())
         {
             if (cfg.source.mode == SourceMode::Video && !cfg.source.video_loop) break;
+            if (!waiting_logged)
+            {
+                VP_INFO("Waiting for camera frames on '%s'...", cfg.source.input_camera_topic.c_str());
+                waiting_logged = true;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
         }
@@ -148,7 +161,9 @@ int main(int argc, char** argv)
             // closer than D_MAX. cipo_raw_found alone must not gate the planner.
             static constexpr double D_MAX = 150.0;
             const bool has_cipo = r->cipo.valid && r->cipo.distance_m < D_MAX;
-            const double cipo_v = has_cipo ? r->cipo.velocity_ms : cfg.speed_limit;
+            // r->cipo.velocity_ms is relative speed (d_dot = v_lead - v_ego).
+            // Therefore v_lead = v_ego + d_dot.
+            const double cipo_v = has_cipo ? std::max(0.0, ego_v + r->cipo.velocity_ms) : cfg.speed_limit;
             const double cipo_dist = r->cipo.distance_m;
 
             const double raw_cte = r->lateral.path_valid

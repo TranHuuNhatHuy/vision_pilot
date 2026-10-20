@@ -45,7 +45,10 @@ def generate_launch_description():
         ],
         output="screen",
         emulate_tty=True,
-        additional_env={'RMW_IMPLEMENTATION': LaunchConfiguration('rmw')},
+        additional_env={
+            'RMW_IMPLEMENTATION': LaunchConfiguration('rmw'),
+            'ROS_LOCALHOST_ONLY': '0',
+        },
     )
 
     carla_vehicle_speed_publisher_node = Node(
@@ -53,7 +56,10 @@ def generate_launch_description():
         executable='carla_vehicle_speed_publisher_node',
         name='carla_vehicle_speed_publisher',
         output='screen',
-        additional_env={'RMW_IMPLEMENTATION': LaunchConfiguration('rmw')},
+        additional_env={
+            'RMW_IMPLEMENTATION': LaunchConfiguration('rmw'),
+            'ROS_LOCALHOST_ONLY': '0',
+        },
         parameters=[{'use_sim_time': True,
                      'host': LaunchConfiguration('host'),
                      'port': LaunchConfiguration('port'),
@@ -65,7 +71,10 @@ def generate_launch_description():
         executable='carla_control_publisher_node',
         name='carla_control_publisher',
         output='screen',
-        additional_env={'RMW_IMPLEMENTATION': LaunchConfiguration('rmw')},
+        additional_env={
+            'RMW_IMPLEMENTATION': LaunchConfiguration('rmw'),
+            'ROS_LOCALHOST_ONLY': '0',
+        },
         parameters=[{'use_sim_time': True}]
     )
 
