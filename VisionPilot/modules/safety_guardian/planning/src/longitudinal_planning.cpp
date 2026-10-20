@@ -13,13 +13,14 @@ double LongitudinalPlanner::compute_acceleration(double kappa, double ego_v, boo
     double curv_v_max = std::sqrt(config_.mu * config_.g / std::abs(kappa));   // inf when kappa ~ 0, fine
     double speed_limit = std::min(config_.speed_limit, curv_v_max);
 
-    // Closing speed — negative when ego is slower than lead (gap opening)
-    double delta_v = cipo_v; // cipo_v relative CIPO vehicle sppeed
+    // Closing speed: delta_v = ego_v - cipo_v
+    // Positive when ego is closing in on lead (v_ego > v_lead), which increases s_star and triggers braking.
+    // Negative when ego is slower than lead (gap opening), which shrinks dynamic_term.
+    double delta_v = has_cipo ? (ego_v - cipo_v) : 0.0;
 
     // Wrap the dynamic term in max(0, …).
-    // Without this, when v < lead_v, delta_v < 0 making dynamic_term
-    // negative, which shrinks s_star below s0 and collapses the interaction
-    // term — IDM would then output full free-road acceleration and overshoot.
+    // When ego is slower than lead (delta_v < 0), dynamic_term is negative;
+    // clamping prevents s_star from dropping below s0.
     double dynamic_term = (ego_v * delta_v) / (2.0 * std::sqrt(config_.a * config_.b));
     double s_star = config_.s0 + std::max(0.0, ego_v * config_.T + dynamic_term);
 
