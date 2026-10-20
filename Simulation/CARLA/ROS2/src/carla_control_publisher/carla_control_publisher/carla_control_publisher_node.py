@@ -3,8 +3,6 @@ from rclpy.node import Node
 
 import numpy as np
 import math
-import carla
-from ackermann_msgs.msg import AckermannDriveStamped
 from carla_msgs.msg import CarlaEgoVehicleControl
 from std_msgs.msg import Float64
 
@@ -20,10 +18,9 @@ class CarlaControlPublisher(Node):
         self.steering_sub_ = self.create_subscription(Float64, '/vehicle/steering_cmd', self.steering_callback, 1)
         self.throttle_sub_ = self.create_subscription(Float64, '/vehicle/throttle_cmd', self.throttle_callback, 1)
         self.speed_sub_ = self.create_subscription(Float64, '/vehicle/speed', self.speed_callback, 1)
-        self.ackerman_control_pub_ = self.create_publisher(AckermannDriveStamped, "/carla/hero/ackermann_control_cmd", 1)
+        self.control_pub_ = self.create_publisher(CarlaEgoVehicleControl, "/carla/hero/vehicle_control_cmd", 1)
 
         self.speed = 0.0
-        self.v_ref = 30.0
         self.steering_angle_cmd = 0.0
         self.acceleration = 0.0
 
@@ -34,26 +31,30 @@ class CarlaControlPublisher(Node):
         self.have_steering = False
         self.have_throttle = False
 
-        # Failsafe watchdog: if upstream stalls, don't keep applying the last
-        # (possibly full-lock) command forever. See note below.
         self.last_cmd_time = self.get_clock().now()
-        # self.watchdog = self.create_timer(0.2, self.watchdog_callback)
-
+        self.watchdog = self.create_timer(0.2, self.watchdog_callback)
 
     def publish_control(self):
-        v = max(0.0, self.speed + self.acceleration * 2.0)
+        accel = float(np.clip(self.acceleration, A_DES_MIN, A_DES_MAX))
 
-        cmd = AckermannDriveStamped()
-        cmd.header.stamp = self.get_clock().now().to_msg()
-        cmd.header.frame_id = 'hero'
-        cmd.drive.steering_angle = float(self.steering_angle_cmd)  # radians
-        cmd.drive.steering_angle_velocity = 0.0
-        cmd.drive.speed = v
-        cmd.drive.acceleration = self.acceleration
-        cmd.drive.jerk = 10.0
-        self.ackerman_control_pub_.publish(cmd)
+        msg = CarlaEgoVehicleControl()
+        if accel >= 0.0:
+            msg.throttle = float(np.clip(accel / MAX_ACCELERATION, 0.0, 1.0))
+            msg.brake = 0.0
+        else:
+            msg.throttle = 0.0
+            msg.brake = float(np.clip(-accel / MAX_DECELERATION, 0.0, 1.0))
 
-        # self.last_cmd_time = now
+        # Convert steering angle (tyre angle in radians) to CARLA normalized steering [-1.0, 1.0]
+        # For Lincoln MKZ in CARLA, full lock is ~70 deg
+        msg.steer = float(np.clip((180.0 / np.pi) * (self.steering_angle_cmd / 70.0), -1.0, 1.0))
+        msg.hand_brake = False
+        msg.reverse = False
+        msg.manual_gear_shift = False
+        msg.gear = 1
+
+        self.control_pub_.publish(msg)
+        self.last_cmd_time = self.get_clock().now()
 
     def try_publish(self):
         if self.have_steering and self.have_throttle:
@@ -62,13 +63,11 @@ class CarlaControlPublisher(Node):
             self.have_throttle = False
 
     def steering_callback(self, msg):
-        # self.get_logger().info(f'Steering command received: {msg.data}')
         self.steering_angle_cmd = msg.data
         self.have_steering = True
         self.try_publish()
 
     def throttle_callback(self, msg):
-        # self.get_logger().info(f'Throttle command received: {msg.data}')
         self.acceleration = msg.data
         self.have_throttle = True
         self.try_publish()
@@ -77,17 +76,14 @@ class CarlaControlPublisher(Node):
         self.speed = msg.data
 
     def watchdog_callback(self):
-        # If no fresh pair has been published recently, command a safe stop
-        # (zero throttle, no brake) rather than latching the last steering.
         dt = (self.get_clock().now() - self.last_cmd_time).nanoseconds * 1e-9
-        if dt > 0.2:
+        if dt > 0.5:
             msg = CarlaEgoVehicleControl()
             msg.throttle = 0.0
             msg.steer = 0.0
-            msg.brake = 0.0
+            msg.brake = 1.0
             msg.gear = 1
             self.control_pub_.publish(msg)
-            self.get_logger().warn(f'Watchdog: no fresh command for {dt:.2f}s — safing')
 
 
 def main(args=None):
@@ -96,6 +92,10 @@ def main(args=None):
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
 
 
 if __name__ == '__main__':
