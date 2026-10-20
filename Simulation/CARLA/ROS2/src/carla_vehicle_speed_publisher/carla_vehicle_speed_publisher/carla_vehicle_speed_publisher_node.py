@@ -30,10 +30,14 @@ class CarlaVehicleSpeedPublisherNode(Node):
         self.actor_search_timer = self.create_timer(0.5, self._retry_find_hero_actor)
 
     def _try_find_hero_actor(self):
-        for actor in self.world.get_actors().filter('vehicle.*'):
-            if actor.attributes.get('role_name') == 'hero':
-                self.hero_actor = actor
-                return True
+        try:
+            self.world = self.client.get_world()
+            for actor in self.world.get_actors().filter('vehicle.*'):
+                if actor.attributes.get('role_name') == 'hero':
+                    self.hero_actor = actor
+                    return True
+        except Exception:
+            pass
         return False
 
     def _retry_find_hero_actor(self):
