@@ -158,26 +158,23 @@ std::optional<InferenceFrameResult> InferencePipeline::process(const cv::Mat& wa
     const double ms_pre = Ms(Clock::now() - t0).count();
 
     auto t_wall = Clock::now();
-    auto f_drive = std::async(std::launch::async, [&] {
-        auto t = Clock::now();
-        auto r = auto_drive_.infer(prev_imn.data(), curr_imn.data());
-        return std::make_pair(std::move(r), Ms(Clock::now() - t).count());
-    });
-    auto f_steer = std::async(std::launch::async, [&] {
-        auto t = Clock::now();
-        auto r = auto_steer_.infer(curr_01_as.data());
-        return std::make_pair(std::move(r), Ms(Clock::now() - t).count());
-    });
-    auto f_speed = std::async(std::launch::async, [&] {
-        auto t = Clock::now();
-        auto r = auto_speed_.infer(curr_01_asp.data());
-        return std::make_pair(std::move(r), Ms(Clock::now() - t).count());
-    });
+    auto t_ad = Clock::now();
+    auto res_drive = auto_drive_.infer(prev_imn.data(), curr_imn.data());
+    const double ms_drive = Ms(Clock::now() - t_ad).count();
 
-    auto [res_drive, ms_drive] = f_drive.get();
-    auto [res_steer, ms_steer] = f_steer.get();
-    auto [res_speed, ms_speed] = f_speed.get();
+    auto t_as = Clock::now();
+    auto res_steer = auto_steer_.infer(curr_01_as.data());
+    const double ms_steer = Ms(Clock::now() - t_as).count();
+
+    auto t_asp = Clock::now();
+    auto res_speed = auto_speed_.infer(curr_01_asp.data(), 0.55f);
+    const double ms_speed = Ms(Clock::now() - t_asp).count();
     const double ms_wall = Ms(Clock::now() - t_wall).count();
+
+    for (const auto& d : res_speed.detections) {
+        VP_INFO("[AutoSpeed-DET] cls=%d score=%.3f bbox=(%.1f, %.1f, %.1f, %.1f)",
+                d.class_id, d.score, d.x1, d.y1, d.x2, d.y2);
+    }
 
     InferenceFrameResult out;
     out.frame_id   = frame_count_;
