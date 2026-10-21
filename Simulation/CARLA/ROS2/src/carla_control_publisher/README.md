@@ -9,7 +9,7 @@ It subscribes to steering and throttle command topics and publishes correspondin
 
 | Topic | Message Type | Description |
 |--------|---------------|-------------|
-| `/carla/hero/ackermann_control_cmd` | `ackermann_msgs/msg/AckermannDriveStamped` | Publishes the steering angle, the target speed and the acceleration to the CARLA ego vehicle. |
+| `/carla/hero/vehicle_control_cmd` | `carla_msgs/msg/CarlaEgoVehicleControl` | Publishes the normalized steering angle [-1.0, 1.0], throttle [0.0, 1.0], and brake [0.0, 1.0] to the CARLA ego vehicle. |
 
 
 

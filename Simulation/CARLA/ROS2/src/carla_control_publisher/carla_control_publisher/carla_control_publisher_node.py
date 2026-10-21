@@ -2,7 +2,6 @@ import rclpy
 from rclpy.node import Node
 
 import numpy as np
-import math
 from carla_msgs.msg import CarlaEgoVehicleControl
 from std_msgs.msg import Float64
 
@@ -92,10 +91,6 @@ def main(args=None):
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
-
-
-if __name__ == '__main__':
-    main()
 
 
 if __name__ == '__main__':

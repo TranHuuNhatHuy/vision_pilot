@@ -171,11 +171,6 @@ std::optional<InferenceFrameResult> InferencePipeline::process(const cv::Mat& wa
     const double ms_speed = Ms(Clock::now() - t_asp).count();
     const double ms_wall = Ms(Clock::now() - t_wall).count();
 
-    for (const auto& d : res_speed.detections) {
-        VP_INFO("[AutoSpeed-DET] cls=%d score=%.3f bbox=(%.1f, %.1f, %.1f, %.1f)",
-                d.class_id, d.score, d.x1, d.y1, d.x2, d.y2);
-    }
-
     InferenceFrameResult out;
     out.frame_id   = frame_count_;
     out.wall_ms    = ms_wall;

@@ -50,7 +50,7 @@ public:
         // Reinitialise filter when a measurement jumps this far from the
         // particle cloud (genuine cut-in / cut-out only).
         float reset_gate_m          = 25.f;
-        bool  debug                = true;
+        bool  debug                = false;
     };
 
     LongitudinalFusion();
