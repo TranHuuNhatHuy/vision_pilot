@@ -28,6 +28,56 @@
 
 </div>
 
+## Quick start for those in CES 2027 project
+
+### 1. Build
+
+#### a. VisionPilot
+
+```bash
+cd ~/<vision_pilot root dir>/VisionPilot 
+rm -rf build && mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_ROS2_INTERFACE=ON -DONNXRUNTIME_ROOT=<path to ONNXRUNTIME dir>
+make -j$(nproc)
+```
+
+#### b. CARLA ROS bridge
+
+```bash
+cd ~/<vision_pilot root dir>/Simulation/CARLA/ROS2
+rm -rf build install log
+colcon build --symlink-install
+```
+
+### 2. Run
+
+#### a. Step 1 - CARLA sim
+
+```bash
+<CARLA root dir>/CarlaUE4.sh --ros2 -nosound
+```
+
+#### b. Step 2 - CARLA ROS2 bridge with a scenario
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/<vision_pilot root dir>/Simulation/CARLA/ROS2/install/setup.bash
+ros2 launch carla_bridge_bringup carla_bridge.launch.py \
+    map:=PoV_Highway \
+    scenario:=lead_vehicle_acc \
+    rmw:=rmw_fastrtps_cpp
+```
+
+You can replace above `scenario` input with other scenarios like `free_drive`, `cut_in`, `convoy_traffic`, etc.
+
+#### c. Step 3 - VisionPilot
+
+```bash
+source /opt/ros/humble/setup.bash
+cd ~/<vision_pilot root dir>/VisionPilot/build
+./VisionPilot
+```
+
 ## Free and fully open-source stack for L2 ADAS
 
 [![Watch the Video](/Media/Vision_Pilot_Thumbnail.jpg)](https://drive.google.com/file/d/16jRW5uB5yv2vV_jAUNkCiqJAamWzTh_y/view)
