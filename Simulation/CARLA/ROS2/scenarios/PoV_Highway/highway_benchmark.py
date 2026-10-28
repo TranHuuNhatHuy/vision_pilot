@@ -40,8 +40,8 @@ class Scenario(PoVHighwayBase):
 
     # ── Tunable Scenario Parameters ────────────────────────────────────────────
     # Fast-start mode: If set to True (or SCENARIO_FAST_START=1), teleports ego to 500m
-    # before Curve 1 so the entire 5-phase test runs in ~60s without a 7km commute.
-    FAST_START = bool(int(os.environ.get("SCENARIO_FAST_START", "0")))
+    # before Curve 1 so the entire 5-phase test runs in ~60-90s without a 7km commute.
+    FAST_START = bool(int(os.environ.get("SCENARIO_FAST_START", "1")))
 
     # Lead vehicle parameters (Phase 3)
     LEAD_SPAWN_DIST_M = float(os.environ.get("LEAD_SPAWN_DIST", 200.0))
@@ -53,7 +53,7 @@ class Scenario(PoVHighwayBase):
     STANDSTILL_BLUEPRINT = os.environ.get("STANDSTILL_BLUEPRINT", "vehicle.audi.a2")
 
     # Cut-out trigger distance between preceding car and standstill obstacle (Phase 5)
-    CUTOUT_TRIGGER_DIST_M = float(os.environ.get("CUTOUT_TRIGGER_DIST", 35.0))
+    CUTOUT_TRIGGER_DIST_M = float(os.environ.get("CUTOUT_TRIGGER_DIST", 45.0))
 
     def __init__(self, world, traffic_manager, hero_vehicle=None):
         super().__init__(world, traffic_manager, hero_vehicle)
@@ -69,6 +69,10 @@ class Scenario(PoVHighwayBase):
         if not self.hero_vehicle or not self.hero_vehicle.is_alive:
             logging.error("[Scenario] Hero vehicle is not valid during setup_npcs")
             return
+
+        # Ensure Traffic Manager does not despawn distant scenario vehicles
+        if hasattr(self.traffic_manager, "set_respawn_dormant_vehicles"):
+            self.traffic_manager.set_respawn_dormant_vehicles(False)
 
         hero_wp = self.get_hero_waypoint()
         self.start_loc = self.hero_vehicle.get_location()
@@ -192,13 +196,12 @@ class Scenario(PoVHighwayBase):
                 keep_lane=True,
             )
             if self.lead_vehicle:
-                # Regulate speed to 50 km/h (13.89 m/s)
-                target_speed_mps = self.LEAD_SPEED_KMH / 3.6
+                # In CARLA Traffic Manager on PoV_Highway (default speed ~30 km/h):
+                # A negative percentage drives faster: (1.0 - 50.0 / 30.0) * 100 = -66.7% yields 50 km/h.
+                pct_diff = (1.0 - (self.LEAD_SPEED_KMH / 30.0)) * 100.0
+                self.traffic_manager.vehicle_percentage_speed_difference(self.lead_vehicle, float(pct_diff))
                 if hasattr(self.traffic_manager, "set_desired_speed"):
-                    self.traffic_manager.set_desired_speed(self.lead_vehicle, target_speed_mps)
-                else:
-                    # In 100 km/h zone, 50% speed limit difference yields 50 km/h
-                    self.traffic_manager.vehicle_percentage_speed_difference(self.lead_vehicle, 50.0)
+                    self.traffic_manager.set_desired_speed(self.lead_vehicle, float(self.LEAD_SPEED_KMH))
 
                 logging.info(
                     "[Scenario] SPAWNED Preceding Vehicle (%s) 200m ahead @ %0.1f km/h",
@@ -220,6 +223,17 @@ class Scenario(PoVHighwayBase):
                 self.standstill_vehicle.apply_control(
                     carla.VehicleControl(hand_brake=True, throttle=0.0, brake=1.0)
                 )
+                try:
+                    self.standstill_vehicle.set_light_state(
+                        carla.VehicleLightState(carla.VehicleLightState.Hazard | carla.VehicleLightState.Brake)
+                    )
+                except Exception:
+                    pass
+
+                # Disable collision detection between lead and obstacle in TM so lead doesn't brake prematurely
+                if self.lead_vehicle and self.lead_vehicle.is_alive:
+                    self.traffic_manager.collision_detection(self.lead_vehicle, self.standstill_vehicle, False)
+
                 logging.info(
                     "[Scenario] SPAWNED Standstill Obstacle (%s) 200m ahead @ 0 km/h",
                     self.standstill_vehicle.type_id
@@ -237,6 +251,8 @@ class Scenario(PoVHighwayBase):
             # does not slam brakes behind the standstill car before executing the cut-out
             self.traffic_manager.ignore_vehicles_percentage(self.lead_vehicle, 100.0)
             self.traffic_manager.distance_to_leading_vehicle(self.lead_vehicle, 0.0)
+            if self.standstill_vehicle and self.standstill_vehicle.is_alive:
+                self.traffic_manager.collision_detection(self.lead_vehicle, self.standstill_vehicle, False)
 
             # Determine best adjacent lane for cut-out (prefer left lane, fallback right)
             lead_wp = self.world.get_map().get_waypoint(
@@ -245,13 +261,17 @@ class Scenario(PoVHighwayBase):
                 lane_type=carla.LaneType.Driving,
             )
             to_right = True
+            offset = 3.85
             if lead_wp.get_left_lane() and lead_wp.get_left_lane().lane_type == carla.LaneType.Driving:
                 to_right = False  # Change to left lane
+                offset = -3.85
             elif lead_wp.get_right_lane() and lead_wp.get_right_lane().lane_type == carla.LaneType.Driving:
                 to_right = True   # Change to right lane
+                offset = 3.85
 
             direction_str = "RIGHT" if to_right else "LEFT"
-            logging.info("[Scenario] EXECUTING SUDDEN CUT-OUT to %s lane!", direction_str)
+            logging.info("[Scenario] EXECUTING SUDDEN CUT-OUT to %s lane via lateral offset (%.2fm)!", direction_str, offset)
+            self.traffic_manager.vehicle_lane_offset(self.lead_vehicle, offset)
             self.traffic_manager.force_lane_change(self.lead_vehicle, to_right)
 
         except Exception as e:
