@@ -55,6 +55,11 @@ class Scenario(PoVHighwayBase):
     # Cut-out trigger distance between preceding car and standstill obstacle (Phase 5)
     CUTOUT_TRIGGER_DIST_M = float(os.environ.get("CUTOUT_TRIGGER_DIST", 45.0))
 
+    # Ambient highway traffic (oncoming vehicles on opposite carriageway & adjacent lane traffic)
+    ENABLE_AMBIENT_TRAFFIC = bool(int(os.environ.get("SCENARIO_AMBIENT_TRAFFIC", "1")))
+    NUM_ONCOMING_VEHICLES = int(os.environ.get("NUM_ONCOMING", "8"))
+    NUM_ADJACENT_VEHICLES = int(os.environ.get("NUM_ADJACENT", "5"))
+
     def __init__(self, world, traffic_manager, hero_vehicle=None):
         super().__init__(world, traffic_manager, hero_vehicle)
         self.phase = Phase.PHASE_1_STRAIGHT_CRUISE
@@ -98,6 +103,9 @@ class Scenario(PoVHighwayBase):
                 self.start_loc = self.hero_vehicle.get_location()
                 self.start_s = hero_wp.s
                 logging.info("[Scenario] Hero vehicle repositioned at s=%.1fm for quick demo", self.start_s)
+
+        # Spawn ambient highway traffic (oncoming vehicles and adjacent lane traffic)
+        self._spawn_ambient_traffic()
 
         logging.info("=" * 70)
         logging.info(" [Scenario] 5-Phase Highway Benchmark Initialized")
@@ -183,6 +191,56 @@ class Scenario(PoVHighwayBase):
                     )
 
     # ── Event Action Helpers ───────────────────────────────────────────────────
+
+    def _spawn_ambient_traffic(self):
+        """Populate highway with oncoming vehicles on opposite carriageway & adjacent lane traffic."""
+        if not self.ENABLE_AMBIENT_TRAFFIC:
+            return
+
+        map_ = self.world.get_map()
+        hero_wp = self.get_hero_waypoint()
+        ego_s = hero_wp.s
+        logging.info("[Scenario] Spawning ambient highway traffic...")
+
+        # 1. Adjacent lane traffic on Road 2 (Lane -1, same direction)
+        # Staggered in adjacent lane so ego lane (-2) remains clear for the 5-phase test
+        adjacent_offsets = [-70.0, 40.0, 110.0, 240.0, 360.0]
+        for offset in adjacent_offsets[:self.NUM_ADJACENT_VEHICLES]:
+            try:
+                adj_s = ego_s + offset
+                if 0.0 < adj_s < 14700.0:
+                    wp = map_.get_waypoint_xodr(2, -1, adj_s)
+                    if wp:
+                        actor = self.spawn_npc(
+                            "vehicle.*",
+                            wp.transform,
+                            autopilot=True,
+                            speed_pct=random.uniform(-10.0, 15.0),
+                            keep_lane=True,
+                        )
+                        if actor:
+                            logging.info("[Scenario] Spawned adjacent lane vehicle at s=%.0fm (%s)", adj_s, actor.type_id)
+            except Exception as e:
+                logging.debug("Failed spawning adjacent traffic at offset %.1f: %s", offset, e)
+
+        # 2. Oncoming traffic on Road 1 (opposite carriageway, separated by median strip)
+        # Stations on Road 1 run parallel to ego's driving corridor
+        oncoming_stations = [6800.0, 7200.0, 7600.0, 8000.0, 8400.0, 8800.0, 9200.0, 9600.0]
+        for onc_s in oncoming_stations[:self.NUM_ONCOMING_VEHICLES]:
+            try:
+                wp = map_.get_waypoint_xodr(1, -2, onc_s)
+                if wp:
+                    actor = self.spawn_npc(
+                        "vehicle.*",
+                        wp.transform,
+                        autopilot=True,
+                        speed_pct=random.uniform(-15.0, 10.0),
+                        keep_lane=True,
+                    )
+                    if actor:
+                        logging.info("[Scenario] Spawned oncoming vehicle at s=%.0fm (%s)", onc_s, actor.type_id)
+            except Exception as e:
+                logging.debug("Failed spawning oncoming traffic at s=%.1f: %s", onc_s, e)
 
     def _spawn_lead_vehicle(self):
         """Spawn preceding vehicle 200m ahead in lane @ 50 km/h."""
